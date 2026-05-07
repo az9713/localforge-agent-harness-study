@@ -117,7 +117,211 @@ The rest of this document checks LocalForge against each of these.
 
 ---
 
-## 2. The roles LocalForge actually plays
+## 2. State of the practice — what Anthropic and OpenAI shipped, early 2026
+
+Chase's framing tells us *what* the canonical pattern is. Anthropic's
+and OpenAI's recent engineering blogs tell us *what it looks like in
+production*. The patterns below are not theory — they are concrete
+primitives, file formats, and architectural choices that already exist
+in shipping systems. They are the bar against which any 2026-era harness
+should be measured.
+
+### 2.1 The benchmark numbers
+
+| System | Run length | Output | Cost / tokens | Source |
+|---|---|---|---|---|
+| OpenAI Codex (single agent, GPT-5.3-Codex) | ~25 hours uninterrupted | ~30,000 LOC (a design tool with canvas, live collab, layers, prototyping, export) | ~13M tokens | [Run long horizon tasks with Codex](https://developers.openai.com/blog/run-long-horizon-tasks-with-codex) |
+| Anthropic Claude Code (16 parallel Opus 4.6 agents) | ~2 weeks, ~2,000 sessions | 100,000-line C compiler that builds Linux 6.9 / QEMU / FFmpeg / SQLite / Postgres / Redis on x86 + ARM + RISC-V, 99% test pass rate | 2B input + 140M output tokens, **~$20,000** | [Building a C compiler with a team of parallel Claudes](https://www.anthropic.com/engineering/building-c-compiler) |
+
+These are the run lengths and output volumes a serious harness is
+expected to support today. LocalForge's 30-minute per-session watchdog
+is two orders of magnitude smaller.
+
+### 2.2 OpenAI's "durable project memory" — four-file pattern
+
+The Codex 25-hour run was held together by **four markdown files** in
+the workspace, each with a distinct contract:
+
+| File | Contract |
+|---|---|
+| `Prompt.md` | Frozen specification: goals, hard constraints, deliverables, completion criteria. The agent must not modify this. |
+| `Plan.md` | Decomposed work as small, verifiable milestones, each with acceptance criteria and validation commands. |
+| `Implement.md` | Execution instructions emphasising scope discipline and continuous validation (test/lint/typecheck after each milestone). |
+| `Documentation.md` | Real-time status updates, decision log, audit trail. Updated continuously. |
+
+OpenAI calls the resulting capability **"durable project memory"** — the
+combination of frozen specs and evolving documentation prevents drift
+and defines "done" consistently across the run.
+
+### 2.3 Anthropic's harness primitives
+
+From [Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)
+and [Long-running Claude for scientific computing](https://www.anthropic.com/research/long-running-Claude):
+
+- **Initializer agent.** A first-run agent whose only job is to write
+  `init.sh` (the canonical "how to run this app" script), seed
+  `claude-progress.txt`, and create the initial git commit. Every
+  subsequent session starts from a known-good baseline rather than
+  rediscovering setup.
+- **Feature list as JSON, not Markdown.** Anthropic's claude.ai-clone
+  example used a 200+ entry JSON document, each entry tagged with
+  `passes: bool` and explicit "do not remove tests" instructions. Why
+  JSON: Claude is less likely to corrupt structured data than free-form
+  Markdown.
+- **Mergeable-between-sessions invariant.** Every session must leave
+  the codebase in a state another agent (or human) could merge: no
+  major bugs, well-documented, orderly. Prevents the "agent leaves
+  half-finished work" failure mode that compounds across sessions.
+- **Standardised session startup routine.** Every session begins:
+  `pwd` → read git log → read progress file → pick highest-priority
+  incomplete feature → run `init.sh` → e2e smoke test. Hard to break
+  state; easy to detect when state is already broken.
+- **`CHANGELOG.md` with explicit "failed approaches" section.** From
+  the scientific-computing post: portable long-term memory captures not
+  just *what was done* but *what was tried and why it didn't work*
+  ("switched from Tsit5 to Kvaerno5 for stiff ODE systems"). Without
+  this, successive sessions re-attempt the same dead ends.
+- **Ralph Loop.** Iterative re-prompting that asks "really done?" up to
+  N iterations. Combats agentic laziness around stopping criteria.
+- **Test-oracle pattern.** A reference implementation or quantifiable
+  objective (e.g. CLASS C source as a benchmark) lets the agent verify
+  its own progress against ground truth.
+- **End-to-end testing via real browsers, not curl.** Anthropic
+  specifically tests features the way users would, via Puppeteer-style
+  MCP automation, because unit tests miss bugs visible only at the
+  browser layer.
+
+From [Harness design for long-running application development](https://www.anthropic.com/engineering/harness-design-long-running-apps):
+
+- **Context resets vs compaction.** Compaction summarises the
+  conversation in place; a context reset starts a fresh session with
+  structured handoff artefacts. Resets *eliminate* the "context anxiety"
+  failure mode (premature task wrapping as the window fills);
+  compaction only mitigates it.
+- **Generator-Evaluator (GAN-inspired).** Two distinct agents — one
+  produces work, the other critiques it. Self-evaluation is unreliable;
+  separating the roles lets you tune the evaluator's skepticism without
+  weakening the generator. Different from sub-agents in §10: this is QA
+  as a peer agent, not delegated sub-tasks.
+- **Sprint contracts.** Before implementation, planner and evaluator
+  negotiate the testable success criteria for the upcoming sprint.
+  Bridges high-level spec to concrete acceptance tests and prevents
+  evaluator/implementer drift.
+- **Use model improvements to *simplify* the harness.** When Opus 4.5
+  improved, Anthropic *removed* their sprint scaffolding and ran a 2+
+  hour Digital Audio Workstation build with just planner + single-pass
+  evaluator. The lesson: model gains are a budget for harness
+  simplification, freeing engineering effort for novel combinations
+  beyond the model's baseline capability — not for piling on more
+  scaffolding.
+
+### 2.4 Anthropic's parallel-agent architecture (the C compiler)
+
+The 16-agent C-compiler harness is the cleanest reference for parallel
+coding agents in production:
+
+- **Shared bare git repo as the synchronisation primitive.** Each
+  Docker container runs one Claude Code agent with a local
+  `/workspace` clone; all agents push to and pull from `/upstream`.
+  Git's natural conflict resolution becomes the harness's concurrency
+  control.
+- **File-based work claiming.** Agents claim tasks by writing lock
+  files into a `current_tasks/` directory. Two agents that try to
+  claim the same task race in git, and the loser handles the conflict
+  by picking a different task.
+- **Specialisation roles instead of one generalist.** The 16 agents
+  were not interchangeable — distinct roles for code deduplication,
+  performance tuning, codegen, architectural critique, documentation,
+  and code quality. Each role has a focused system prompt.
+- **Oracle comparison for verification.** GCC was used as a
+  "known-good" oracle: random files were compiled by both Claude and
+  GCC, with diffs flagging behavioural divergence. Verification *as a
+  data product*, not a test pass/fail.
+- **Time-blindness mitigation.** A `--fast` flag runs each agent on a
+  random 1-10% sample of work per pass to avoid an agent
+  re-investigating the same file forever.
+- **Context-pollution prevention.** Agents emit minimal stdout and
+  write extensively to log files. Parent context stays clean; debugging
+  artefacts are durable on disk.
+
+### 2.5 Anthropic's brain/harness/hands/session split (Managed Agents)
+
+[Scaling Managed Agents](https://www.anthropic.com/engineering/managed-agents)
+formalises a 4-way decoupling that LocalForge collapses into a single
+process:
+
+```
+Brain    = inference (the LLM call)
+Harness  = the loop controlling tool calls
+Hands    = sandbox execution environment
+Session  = persistent conversation state, externalised
+```
+
+Key consequences:
+
+- **Stateless harness.** The harness holds no state; sessions live in
+  external storage and resume via `getSession(id)`. Failed harness
+  containers are *cattle* (replaced), not *pets* (debugged).
+- **Sandbox as a tool.** Each sandbox exposes a single
+  `execute(name, input) → string` interface. The brain doesn't know it
+  is talking to a container; the container doesn't know which brain is
+  talking to it.
+- **Credentials never touch the harness.** Auth is bundled with the
+  resource (e.g. git tokens with the repo) or held in a vault. The
+  harness has no path to read them.
+
+The architecture nets a **~60% p50 / ~90% p95** time-to-first-token
+improvement because containers are provisioned only when needed. More
+importantly, it makes credential isolation, per-resource auth, and
+brain-vs-hands debugging tractable.
+
+### 2.6 OpenAI's `SKILL.md` manifest format
+
+[Shell + Skills + Compaction](https://developers.openai.com/blog/skills-shell-tips)
+formalises Chase's "Markdown + scripts" framing into a concrete
+manifest:
+
+- A **skill** is a versioned bundle: a `SKILL.md` describing the skill,
+  plus its supporting files (templates, scripts, examples).
+- Models are exposed only the **name, description, and path** of each
+  skill — full contents load *only when invoked*. "Templates inside
+  skills are basically free when unused."
+- Skill **descriptions are routing logic**, not marketing. Required:
+  explicit "use when" and **"don't use when"** sections, negative
+  examples, edge cases. Glean reported skill triggering dropped 20% in
+  production until they added negative examples; once added, a
+  Salesforce skill went from 73% → 85% eval accuracy and reduced
+  time-to-first-token by 18.1%.
+- For deterministic production workflows, the system prompt should
+  explicitly direct the model: "Use the `[skill name]` skill."
+
+### 2.7 OpenAI's compaction primitive
+
+Same post; worth its own note. **Server-side compaction** runs
+automatically when context approaches the threshold; an explicit
+`/responses/compact` endpoint gives clients control. The operational
+guidance is sharp: **use compaction as a default long-run primitive,
+not as an emergency fallback**. Treating it as emergency-only causes
+restart behaviour and lost continuity; treating it as default keeps
+extended runs coherent without manual intervention.
+
+### 2.8 What this section means for LocalForge
+
+The takeaway is that the canonical patterns are no longer abstract.
+They are: a four-file durable memory format, a `SKILL.md` manifest, an
+initializer-agent boot sequence, a `CHANGELOG.md` with failed-approach
+entries, generator-evaluator pairs, shared-git-with-lockfiles for
+parallel agents, brain/harness/hands/session decoupling, and compaction
+as a first-class primitive. Each maps to a concrete file, a concrete
+table column, a concrete API call, or a concrete container topology.
+
+LocalForge has *none* of them. The recommendations in §13 below are
+upgraded throughout to cite these as the reference implementation
+rather than describing the same idea from first principles.
+
+---
+
+## 3. The roles LocalForge actually plays
 
 LocalForge is a real agent harness — narrow, opinionated, and local-first —
 not a wrapper around a model API. The clearest way to see this is to list
@@ -151,7 +355,7 @@ isolates, gates, persists, and reports on those loops.
 
 ---
 
-## 3. When each role activates — a session walkthrough
+## 4. When each role activates — a session walkthrough
 
 Here is exactly when each harness role engages, ordered by the sequence the
 user experiences:
@@ -212,7 +416,7 @@ the repo root for post-mortem analysis.
 
 ---
 
-## 4. Requirement-by-requirement scorecard
+## 5. Requirement-by-requirement scorecard
 
 Against the twelve canonical components plus the two cross-cutting
 properties, here is LocalForge's status. Scores: **🟢 Solid**,
@@ -248,7 +452,7 @@ and any form of self-improvement.
 
 ---
 
-## 5. Long-running task support — does it really work?
+## 6. Long-running task support — does it really work?
 
 **Short answer: it works for a *project*, but not for a *single agentic
 task*.**
@@ -292,7 +496,7 @@ production "leave it running overnight" harness it is not.
 
 ---
 
-## 6. Self-improvement support — does it really work?
+## 7. Self-improvement support — does it really work?
 
 **Short answer: no. Not in any meaningful sense.**
 
@@ -322,7 +526,7 @@ long-term store and re-reads it on each run. LocalForge does not do this.
 
 ---
 
-## 7. Tool calling — how does it work?
+## 8. Tool calling — how does it work?
 
 Tool calling is one of LocalForge's stronger areas, because it inherits
 Pi's machinery and adds two thoughtful customisations on top.
@@ -381,7 +585,7 @@ What's missing at the tool layer:
 
 ---
 
-## 8. Planning — does it really work?
+## 9. Planning — does it really work?
 
 **Short answer: it plans once, up front, and never replans.**
 
@@ -427,7 +631,7 @@ adapt.
 
 ---
 
-## 9. Sub-agents — does it really work?
+## 10. Sub-agents — does it really work?
 
 **Short answer: no. There are no sub-agents.**
 
@@ -505,7 +709,7 @@ is the prerequisite for both.
 
 ---
 
-## 10. File system access — does it really work?
+## 11. File system access — does it really work?
 
 **Short answer: as a tool surface yes, as a memory substrate no.**
 
@@ -599,7 +803,7 @@ the absence is structural.
 
 ---
 
-## 11. Honest critique
+## 12. Honest critique
 
 LocalForge is best understood as a **demo-quality coding harness** that
 takes the unusual stance of being entirely local-model driven. Within that
@@ -648,7 +852,7 @@ The *integrity* of the harness is good. The *ambition* is small.
 
 ---
 
-## 12. Recommendations — making LocalForge a real long-running, self-evolving harness
+## 13. Recommendations — making LocalForge a real long-running, self-evolving harness
 
 Below is a concrete, prioritised path. Each item is sized so that a
 LocalForge-built feature could implement it.
@@ -674,24 +878,53 @@ These are cheap to implement and unlock everything else.
    errors into a `failures` table. The next agent that picks the feature
    reads this and is told "previous attempt failed because X — avoid
    repeating".
+4a. **Adopt Anthropic's initializer-agent pattern.** On project
+    creation, run a one-shot Pi session whose only job is to write
+    `projects/<slug>/init.sh` (the canonical "how to run this app"
+    script), seed `projects/<slug>/.localforge/CHANGELOG.md`, and
+    create the initial git commit. Every subsequent coding session
+    starts with `pwd` → `git log` → read `CHANGELOG.md` → run
+    `init.sh` → e2e smoke check, before touching any new feature.
+    Reference: [Effective harnesses for long-running agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents).
 
 ### Tier 2 — give the agent memory it can write
 
-5. **Add a per-project `AGENT_NOTES.md`** that lives in
-   `projects/<slug>/.localforge/AGENT_NOTES.md` and is automatically
-   prepended to every coding agent's system prompt. Add a `note` tool that
-   appends a line to it. The agent can record assumptions, gotchas,
-   decisions; future runs see them.
-6. **Add a global skill library — the "Markdown + scripts" form.**
+5. **Adopt OpenAI's four-file durable-memory pattern.** Each project
+   gets `projects/<slug>/.localforge/{Prompt.md, Plan.md, Implement.md,
+   Documentation.md}`. `Prompt.md` is frozen at project creation (goals,
+   hard constraints, completion criteria) and the agent must not modify
+   it. `Plan.md` holds verifiable milestones with acceptance criteria
+   and validation commands (this is what the kanban materialises today
+   — keep both). `Implement.md` holds execution instructions
+   emphasising scope discipline and continuous validation. `Documentation.md`
+   is the agent's running notebook: status, decision log, audit trail —
+   appended after every tool call of consequence. Every coding session
+   reads all four into the system prompt at start; the agent has tools
+   to update only `Plan.md` and `Documentation.md`. Reference:
+   [Run long horizon tasks with Codex — OpenAI](https://developers.openai.com/blog/run-long-horizon-tasks-with-codex).
+5a. **Add a `CHANGELOG.md` with an explicit "failed approaches"
+    section.** Per Anthropic's scientific-computing post, the most
+    valuable thing a long-running agent leaves behind is *what was
+    tried and why it didn't work* — not just a list of completed
+    work. Schema: `## Status`, `## Completed`, `## Failed approaches`
+    (each entry: what was tried, why it failed, what to try next),
+    `## Known limitations`. Future agents read this before picking
+    work. Reference: [Long-running Claude for scientific computing](https://www.anthropic.com/research/long-running-Claude).
+6. **Add a global skill library using the `SKILL.md` manifest format.**
    Re-enable Pi's `noSkills: false` and adopt the existing
    `.agents/skills/` folder structure that already ships in the repo.
-   Per Chase's framing, a skill is not a prompt — it's a Markdown file
-   with instructions plus executable scripts (Python that hits a URL,
-   bash that runs a build, optionally GPU-accelerated jobs). The agent
-   chooses which skills to invoke; the scripts are the deterministic
-   part. Curate a small starter set (workspace-guard-friendly bash
-   patterns, common Next.js fixes, Drizzle idioms, dev-server reset)
-   and let users add more.
+   Per OpenAI's [Shell + Skills + Compaction](https://developers.openai.com/blog/skills-shell-tips):
+   a skill is a versioned bundle — `SKILL.md` (manifest) plus its
+   supporting files (templates, scripts, examples). The model sees
+   only the **name, description, and path** until it invokes the
+   skill; full contents load on-demand. **Skill descriptions are
+   routing logic, not marketing**: every description must include
+   explicit "use when" and "don't use when" sections, plus negative
+   examples and edge cases. (Glean reported skill triggering dropped
+   20% in production until they added these; once added, a Salesforce
+   skill went from 73% → 85% eval accuracy.) Curate a small starter
+   set: workspace-guard-friendly bash patterns, dev-server reset,
+   Next.js error fixes, Drizzle migration idioms.
 7. **Failure → memory feedback loop.** When a feature succeeds, ask the
    agent (one extra Pi call) for a one-line lesson and append it to the
    project notes. When a feature fails, do the same for the failure mode.
@@ -713,6 +946,34 @@ These are cheap to implement and unlock everything else.
     fixed projects + expected feature counts + golden screenshots, run on
     CI. This is the meta-eval that catches regressions in the harness
     rather than in any one agent.
+11a. **Generator-Evaluator pair.** Per Anthropic's
+     [harness-design-long-running-apps](https://www.anthropic.com/engineering/harness-design-long-running-apps),
+     pair every coding-agent run with an evaluator-agent run that
+     reads the same feature spec, the agent's diff, and the
+     `Documentation.md`, then renders a verdict (`pass | fail | flag`)
+     plus reasoning. Self-evaluation is unreliable; a peer evaluator
+     with a different system prompt is the lightest-weight QA gate
+     that actually works. Different from sub-agents (Tier 8) — this
+     is QA-as-second-agent, not delegated sub-tasks.
+11b. **Test-oracle pattern.** Where a reference implementation exists
+     for the feature being built (an upstream API, a known-good
+     library, a snapshot of the working previous version), expose it
+     to the agent as a tool that returns ground-truth output for any
+     given input. The agent verifies its own progress against the
+     oracle rather than trusting unit tests alone. Reference:
+     [Long-running Claude for scientific computing](https://www.anthropic.com/research/long-running-Claude).
+11c. **Ralph Loop.** When an agent claims a feature is done, run a
+     short follow-up Pi session whose only prompt is "really done?
+     Check `Plan.md` acceptance criteria one by one and run each
+     validation command." Up to N iterations. Combats agentic
+     laziness around stopping criteria.
+11d. **"Mergeable between sessions" as a hard invariant.** Per
+     Anthropic, every session must leave the codebase in a state
+     another agent (or human) could merge: no major bugs, well-
+     documented, orderly. Add a final `git status` + build + lint
+     check as the last step of every coding-agent run; if any fail,
+     the session is marked failed even if the agent itself claimed
+     success.
 
 ### Tier 4 — better planning
 
@@ -724,10 +985,20 @@ These are cheap to implement and unlock everything else.
 13. **Goal hierarchy.** Add an `epics` table (or just a parent_id on
     features) so the planner can decompose top-down without flattening the
     backlog into one tier.
-14. **Explicit Plan.md / Implement.md artefacts.** Adopt the
-    awesome-harness convention: every project has a `docs/PLAN.md` the
-    bootstrapper writes and the orchestrator reads on each schedule
-    decision. The plan can be edited by hand mid-project.
+14. **Plan.md / Implement.md as first-class artefacts.** Subsumed by
+    Tier 2 #5 (the four-file durable-memory pattern). The bootstrapper
+    writes `Plan.md` from the chat transcript; the planner-Pi from
+    item #12 above edits it mid-project; the orchestrator reads it on
+    each schedule decision and the user can edit it by hand. The
+    kanban becomes a view onto `Plan.md`, not the source of truth.
+14a. **Sprint contracts.** Per Anthropic's harness-design post,
+     before each sprint (or each batch of features), a planner-Pi and
+     an evaluator-Pi negotiate the testable success criteria and
+     write them into `Plan.md` *before* implementation begins. The
+     coding agent's stop condition becomes "all listed validation
+     commands return zero", not "I think I'm done". This bridges
+     fuzzy spec → concrete acceptance tests and prevents
+     evaluator/implementer drift.
 
 ### Tier 5 — broaden the tool surface
 
@@ -745,14 +1016,30 @@ These are cheap to implement and unlock everything else.
 
 ### Tier 6 — turn it into a real long-running harness
 
-18. **Workflow-style durable execution.** Adopt or write a tiny
-    state-machine engine: each Pi session is a workflow run; each turn is
-    a step; checkpoints are written after every step; on restart the
-    workflow resumes. The work in Tier 1 is the prerequisite.
-19. **Git worktree per feature.** Each in-progress feature gets its own
-    worktree under `projects/<slug>/.worktrees/feature-<id>/`. Two
-    parallel agents on the same project no longer fight over the same
-    files. Merge to the main worktree on success.
+18. **Workflow-style durable execution + brain/harness/hands/session
+    decoupling.** Adopt or write a tiny state-machine engine: each Pi
+    session is a workflow run; each turn is a step; checkpoints are
+    written after every step; on restart the workflow resumes. The
+    architectural reference is Anthropic's
+    [Managed Agents](https://www.anthropic.com/engineering/managed-agents)
+    4-way split: **Brain** (LLM call) + **Harness** (loop) +
+    **Hands** (sandbox via `execute(name, input) → string`) +
+    **Session** (state, externalised). Stateless harness — failed
+    runner processes are *cattle*, not *pets*. Sandbox becomes a
+    tool, not an environment. Credentials live with resources or in
+    a vault; the harness never sees them. The work in Tier 1 is the
+    prerequisite.
+19. **Shared-bare-git-repo + file-based lockfiles for parallel
+    agents.** Replace the current "single project folder, multiple
+    agents racing" model with the topology Anthropic used to build
+    a 100k-LOC C compiler with 16 parallel Claudes: one bare git
+    repo at `projects/<slug>/.upstream.git`, each agent gets its
+    own `projects/<slug>/.workspaces/<session-id>/` clone, and
+    work is claimed by writing lockfiles into a `current_tasks/`
+    directory. Git's natural conflict resolution becomes the
+    harness's concurrency control; agents handle merge conflicts
+    automatically. Reference:
+    [Building a C compiler with a team of parallel Claudes](https://www.anthropic.com/engineering/building-c-compiler).
 20. **Distributed control plane (opt-in).** Replace SQLite with a
     Postgres mode behind a single connection-string setting so a team
     can share one harness. This is the biggest architectural change in
@@ -814,6 +1101,18 @@ These are cheap to implement and unlock everything else.
     Append a short summary of the original user intent to every coding
     session's prompt — the agent should know *why* a feature exists, not
     just *what* it is.
+29a. **Compaction as a default long-run primitive, not an emergency
+     fallback.** When a Pi session's context approaches the model's
+     window, summarise the older half of the conversation in place
+     (preserving the system prompt, the active feature spec, and the
+     `Documentation.md` snapshot) and continue. Anthropic's
+     [context-engineering essay](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+     and OpenAI's [Shell + Skills + Compaction](https://developers.openai.com/blog/skills-shell-tips)
+     both make the same point: **compaction should run continuously
+     in the background, not be triggered as a last resort**. Pair it
+     with periodic "context resets" (Anthropic's term — a fresh
+     session that reads only the four-file durable memory, not the
+     prior conversation) for tasks that span many hours.
 
 ### Tier 10 — async sub-agents (Chase's near-term direction)
 
@@ -905,7 +1204,7 @@ Per Chase: 5–10 scenarios is enough to start. Don't wait for 1,000.
 
 ---
 
-## 13. Bottom line
+## 14. Bottom line
 
 LocalForge is a **real harness** — narrow, correct, and observable, with a
 genuine permission layer and a clean separation between the model SDK (Pi)
@@ -945,8 +1244,19 @@ The blunt summary: LocalForge today is a competent *narrow* harness in a
 field that is rapidly standardising on a *deep* one. Closing that gap is
 not a research project — every primitive that's missing has a working
 reference implementation in the public domain (Claude Code, LangGraph,
-Anthropic's memory tool, OpenClaw, Symphony). The work is integration,
-not invention.
+Anthropic's memory tool, OpenClaw, Symphony, OpenAI's Shell + Skills +
+Compaction primitives, Anthropic's Managed Agents brain/harness/hands/
+session split). The work is integration, not invention.
+
+**The bar to clear, in 2026 numbers.** A single Codex agent on
+GPT-5.3-Codex ran uninterrupted for ~25 hours and produced ~30,000 LOC
+of working application code, held together by four markdown files
+(`Prompt.md` / `Plan.md` / `Implement.md` / `Documentation.md`).
+Sixteen parallel Opus 4.6 agents, in ~2,000 sessions over two weeks,
+produced a 100,000-LOC C compiler that builds Linux 6.9 on three
+architectures, with 99% test pass rate, for ~$20,000 in API spend.
+LocalForge's current ceiling is one feature per ~30-minute session.
+Three orders of magnitude is a lot of room to grow.
 
 ---
 
@@ -975,3 +1285,10 @@ not invention.
 - [Using agent memory — Claude API Docs](https://platform.claude.com/docs/en/managed-agents/memory)
 - [Harrison Chase on deep agents, async sub-agents, and agent identity — NVIDIA AI Podcast (2026)](https://www.youtube.com/watch?v=c-fsL0gsmo0) — primary source for the deep-agent fingerprint, the 9-month re-architecture cadence, the skills-as-Markdown-plus-scripts framing, and the always-on / agent-identity directions cited throughout this document
 - [Deep Agents — LangChain blog](https://blog.langchain.com/) (search "deep agents")
+- [Effective harnesses for long-running agents — Anthropic](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents) — initializer agent, feature-list-as-JSON, mergeable invariant, session startup routine
+- [Harness design for long-running application development — Anthropic](https://www.anthropic.com/engineering/harness-design-long-running-apps) — context resets vs compaction, generator-evaluator, sprint contracts, "use model gains to simplify the harness"
+- [Long-running Claude for scientific computing — Anthropic](https://www.anthropic.com/research/long-running-Claude) — `CHANGELOG.md` with failed-approaches section, Ralph Loop, test-oracle pattern
+- [Building a C compiler with a team of parallel Claudes — Anthropic](https://www.anthropic.com/engineering/building-c-compiler) — 16 parallel Opus 4.6 agents, shared bare git repo + lockfiles, oracle comparison, $20k / 100k LOC / 99% pass rate
+- [Scaling Managed Agents: Decoupling the brain from the harness — Anthropic](https://www.anthropic.com/engineering/managed-agents) — brain/harness/hands/session 4-way decoupling, stateless harness, sandbox-as-tool
+- [Shell + Skills + Compaction: Tips for long-running agents — OpenAI Developers](https://developers.openai.com/blog/skills-shell-tips) — `SKILL.md` manifest format, "use when / don't use when" routing logic, compaction as default
+- [Run long horizon tasks with Codex — OpenAI Developers](https://developers.openai.com/blog/run-long-horizon-tasks-with-codex) — 25h / 13M tokens / 30k LOC, the four-file durable-memory pattern (`Prompt.md` / `Plan.md` / `Implement.md` / `Documentation.md`)
