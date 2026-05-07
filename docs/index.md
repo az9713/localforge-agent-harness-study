@@ -15,6 +15,7 @@ LocalForge is a local-first autonomous coding harness: you describe an app, it t
 | [Bootstrapper](concepts/bootstrapper.md) | How chat becomes a validated backlog |
 | [Orchestrator](concepts/orchestrator.md) | How LocalForge chooses and schedules agent work |
 | [Agent runner](concepts/agent-runner.md) | How the child process talks to Pi, writes code, verifies, and reports back |
+| [Pi integration](concepts/pi-integration.md) | Where Pi sits, when it's invoked, how it's configured, and what it does (and doesn't) own |
 | [System design](architecture/system-design.md) | Runtime components, data flows, and design decisions |
 | [Runtime settings](reference/runtime-settings.md) | Global settings, project overrides, environment variables, and package scripts |
 | [Common issues](troubleshooting/common-issues.md) | Model, database, server, agent, and verification failures |

@@ -54,6 +54,44 @@ build it on your own hardware. Point it at a model running in LM Studio, click
 Start, and the orchestrator breaks your idea into features, tracks them on a
 kanban board, and deploys agents to implement and test them one at a time.
 
+## Pi is the brain. LocalForge is the harness.
+
+LocalForge does **not** ship its own LLM agent loop. The actual coding is done
+by **[Pi](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)** —
+the open-source `@mariozechner/pi-coding-agent` SDK — which LocalForge embeds
+as a library and points at your local model.
+
+```
+LocalForge                          │  Pi
+────────────────────────────────────┼──────────────────────────────────
+Kanban, project folders,            │  AgentSession (turn loop),
+SQLite state, orchestrator,         │  ModelRegistry, AuthStorage,
+SSE log feed, settings UI,          │  built-in tools (read, write, edit,
+workspace-guard extension           │  bash, grep, find, ls),
+                                    │  resource loader, session manager
+```
+
+LocalForge invokes Pi in exactly **two** places:
+
+1. **Bootstrapper** (`app/api/agent-sessions/[id]/generate-features/route.ts`) —
+   chat → backlog. Pi runs with **no built-in tools**; it can only call
+   custom feature-CRUD tools that write to SQLite. Pi acts as a structured-
+   output engine here.
+2. **Coding agent** (`scripts/agent-runner.mjs`, spawned by the orchestrator) —
+   feature → code. Pi gets the **full built-in toolset** plus a workspace-
+   guard extension that blocks any write/edit/bash outside the project
+   folder. This is where Pi reads files, edits source, runs `npm install`,
+   fixes type errors, etc.
+
+Each Pi session is single-purpose, single-feature, and disposable. LocalForge
+never forks Pi — it uses it as a library, configures it per session, subscribes
+to its event stream (`tool_execution_start`, `message_update`, `turn_end`),
+and turns those events into the live activity panel you see in the UI.
+
+For the full deep-dive — model config, system prompts, hook points, lifecycle
+of a single session, what does and does not call Pi — see
+[`docs/concepts/pi-integration.md`](docs/concepts/pi-integration.md).
+
 ## How the orchestrator works
 
 1. You create a project, either manually or by chatting with the AI bootstrapper.
