@@ -60,6 +60,59 @@ Two cross-cutting properties matter just as much:
 - **Self-evolution.** Mature harnesses let the agent grow new skills, learn
   from past sessions, and refine its memory without retraining the model.
 
+### Harrison Chase's "deep agent" — the contemporary canonical pattern
+
+The most precise contemporary articulation comes from Harrison Chase
+(LangChain CEO, [NVIDIA AI Podcast, 2026](https://www.youtube.com/watch?v=c-fsL0gsmo0)).
+After watching Claude Code, Manus, Deep Research, and OpenClaw all converge
+on the same shape, Chase formalised it as the **deep agent**: a
+general-purpose harness that gives an LLM more autonomy inside an
+environment. The architectural fingerprint is concrete and short:
+
+> "An LLM in a tool-calling loop, connected to a file system, using
+> planning and sub-agents."
+>
+> — Harrison Chase
+
+Five primitives. Loop, tools, file system, planning, sub-agents. Chase's
+thesis is that this is now the *standard* shape — not a research
+direction, not one of many options, but the architectural pattern that
+production deep agents have all converged on. He frames the whole system
+as:
+
+```
+Model + Harness + Environment = Deep Agent
+
+Model       = frontier / open / fine-tuned LLM
+Harness     = loop, planner, tool use, sub-agents, memory, eval integration
+Environment = filesystem, shell, browser, APIs, secure runtime, GPU/cloud/local
+```
+
+Two of Chase's claims sharpen the rest of this analysis:
+
+1. **Coding-agent patterns *are* the deep-agent harness.** Chase notes
+   that coding-specialised models (e.g. Qwen Coder) make better
+   general-purpose agent drivers than their broader counterparts, because
+   "the harness has a file system; it has a bash tool" — i.e. the
+   harness already looks like a coding environment. Coding competence
+   is a proxy for tool discipline, file-system navigation, and
+   structured action. This validates LocalForge — a coding-specialised
+   harness — as a useful substrate for *general* agentic work, not just
+   "build me a Next.js app".
+2. **Re-architect every nine months.** Chase's sharper enterprise claim
+   is that any agent harness more than ~18 months old is probably
+   structurally obsolete, and teams should expect to rewrite roughly
+   every nine months. The pace at which the canonical components
+   (planning, sub-agents, memory, identity) are being defined means
+   that "we shipped it last year" is not a defence.
+
+Throughout the rest of this document, when we score LocalForge against
+"the canonical pattern", the canon being referenced is Chase's five
+primitives plus the enterprise-readiness layer he calls out (trust =
+observability + evals + identity + permissions). The twelve-component
+table above is the expanded form; Chase's five-element fingerprint is
+the irreducible core.
+
 The rest of this document checks LocalForge against each of these.
 
 ---
@@ -181,6 +234,10 @@ properties, here is LocalForge's status. Scores: **🟢 Solid**,
 | 12 | Human-in-the-loop | 🟡 | Stop button (SIGTERM → SIGKILL fallback) and manual feature edit. No mid-run approve/deny gates on tool calls, no "agent is about to do X — approve?" prompts. |
 | — | **Durability** | 🟡 | SQLite control plane is durable: feature status, session rows, logs all survive restart, and orphaned sessions are reconciled on next start. **But:** Pi's own conversation state is in-memory; if a session is killed mid-feature, the agent restarts the feature from scratch, not from the last tool call. There is no checkpoint/resume of an in-flight Pi session. |
 | — | **Self-evolution** | 🔴 | Nothing. There is no skill library written by past runs, no failure post-mortem fed back into the next run's prompt, no editable agent memory file, no "lessons learned" mechanism. The harness is the same on run #1 and run #1000. |
+| — | **Async sub-agents** *(Chase)* | 🔴 | All Pi sessions are synchronous. The orchestrator spawns a child process and waits; the child runs Pi to completion. There is no manager-checks-on-background-worker pattern, which Chase identifies as the imminent next step for coding harnesses. |
+| — | **Always-on / event-driven** *(Chase)* | 🔴 | The harness is purely click-driven via the kanban Start button (with auto-continue between features within one project run). There is no event loop watching a queue, mailbox, GitHub issue tracker, or filesystem; LocalForge does not wake itself up. Chase calls always-on event-driven agents the next major productivity unlock; LocalForge has the substrate for it but not the trigger surface. |
+| — | **Agent identity** *(Chase)* | 🔴 | The agent runs as a child process under the user's local OS account, with no separate identity, no credentials of its own, no audit trail keyed to "the agent" rather than "the user". This is fine for a single-user local tool, but the moment two people use the same harness or it touches anything authenticated, the absence becomes structural. |
+| — | **Verification depth (evals)** *(Chase)* | 🔴 | Chase's "5–10 eval scenarios is enough to start" framing makes the gap concrete: LocalForge has zero. The optional Playwright check is a runtime smoke test, not an eval suite. There is no `tests/evals/` with input → expected-behaviour pairs, no LangSmith-style scenario library, no comparison run against prior versions of the prompt or harness. |
 
 Aggregate read: LocalForge is a **competent narrow-scope harness** — the
 "glue" parts (orchestration, persistence, observability, isolation,
@@ -434,6 +491,18 @@ art coding harnesses. Anthropic's Claude Code, OpenAI's Codex/Symphony,
 and most production LangGraph deployments rely heavily on sub-agent
 delegation; LocalForge has not yet adopted the pattern at all.
 
+**The async-sub-agent direction.** Harrison Chase argues that the next
+visible step is *asynchronous* sub-agents: an orchestrator agent spins
+up long-running background sub-agents and periodically checks in on them
+rather than blocking until they return. LocalForge is structurally close
+to enabling this — the orchestrator already manages parallel Pi sessions
+in spawned child processes — but the relationship today is *peer
+parallelism*, not *manager + workers*. To get to Chase's pattern,
+LocalForge would need (a) the synchronous sub-agent primitive (Tier 8)
+first, and then (b) a way for the parent session to fire-and-monitor
+rather than fire-and-block. The session-state durability work in Tier 1
+is the prerequisite for both.
+
 ---
 
 ## 10. File system access — does it really work?
@@ -514,6 +583,17 @@ harnesses treat the workspace directory as a hybrid of "code under
 construction" and "agent's notebook". LocalForge has the former and not
 the latter.
 
+Chase's deep-research anecdote is the cleanest illustration: when
+LangChain first prototyped a deep agent, they "gave it access to a
+bunch of files, and we just put it in this virtual file system and had
+it do some research. And it wasn't even really doing RAG. It was just
+grepping and globbing like a coding agent would over these files. And
+it worked fantastically well." The file system *is* the memory.
+LocalForge has all the grep/glob/read tooling already wired up; what's
+missing is the convention that some files in the project folder are the
+agent's notes, and the harness is responsible for maintaining and
+re-presenting them on each run.
+
 The fix is small — Tier 2 in the recommendations below covers it — but
 the absence is structural.
 
@@ -553,6 +633,16 @@ direction:
    EventEmitter is fine for one developer; not fine for "team uses the
    same harness". The architecture is consciously local-first, which is a
    choice not a defect, but worth naming.
+7. **It is, by Chase's calendar, due for re-architecture.** Harrison
+   Chase's working assumption is that any agent harness more than
+   ~18 months old is structurally obsolete and should be expected to be
+   rewritten roughly every nine months. LocalForge's design predates the
+   "deep agent" canonical pattern crystallising; some of what's missing
+   here (sub-agents, agent memory, async, identity) is missing
+   specifically because those primitives weren't yet considered
+   table-stakes when LocalForge was designed. That isn't a flaw in
+   LocalForge — it's a property of the field. But it is a reason to
+   treat the recommendations below as urgent rather than aspirational.
 
 The *integrity* of the harness is good. The *ambition* is small.
 
@@ -592,11 +682,16 @@ These are cheap to implement and unlock everything else.
    prepended to every coding agent's system prompt. Add a `note` tool that
    appends a line to it. The agent can record assumptions, gotchas,
    decisions; future runs see them.
-6. **Add a global skill library.** Re-enable Pi's `noSkills: false` and
-   adopt the existing `.agents/skills/` folder structure that already
-   ships in the repo. Curate a small starter set (workspace-guard-friendly
-   bash patterns, common Next.js fixes, Drizzle idioms) and let users add
-   more.
+6. **Add a global skill library — the "Markdown + scripts" form.**
+   Re-enable Pi's `noSkills: false` and adopt the existing
+   `.agents/skills/` folder structure that already ships in the repo.
+   Per Chase's framing, a skill is not a prompt — it's a Markdown file
+   with instructions plus executable scripts (Python that hits a URL,
+   bash that runs a build, optionally GPU-accelerated jobs). The agent
+   chooses which skills to invoke; the scripts are the deterministic
+   part. Curate a small starter set (workspace-guard-friendly bash
+   patterns, common Next.js fixes, Drizzle idioms, dev-server reset)
+   and let users add more.
 7. **Failure → memory feedback loop.** When a feature succeeds, ask the
    agent (one extra Pi call) for a one-line lesson and append it to the
    project notes. When a feature fails, do the same for the failure mode.
@@ -720,6 +815,94 @@ These are cheap to implement and unlock everything else.
     session's prompt — the agent should know *why* a feature exists, not
     just *what* it is.
 
+### Tier 10 — async sub-agents (Chase's near-term direction)
+
+Builds on Tier 8 (synchronous sub-agents). Implement these only after
+Tier 8 lands.
+
+30. **Fire-and-monitor delegation.** Add a `delegate_async(brief, …)`
+    tool that returns a handle (`subagent_id`) immediately rather than
+    blocking. The parent continues its loop and can call
+    `check_subagent(subagent_id)` to read partial progress or
+    `await_subagent(subagent_id)` when it's ready to consume the
+    result. This is the literal pattern Chase predicts will dominate
+    coding harnesses next.
+31. **Background-task table.** Add `background_tasks(id, parent_session_id,
+    subagent_session_id, brief, status, progress_summary, started_at,
+    finished_at)` so the orchestrator can render a "what's running in
+    the background" panel and so the parent's `check_subagent` call
+    returns durable state, not just in-memory state.
+32. **Manager UI mode.** Optional second mode for the kanban: instead
+    of "you click Start, agents work the backlog", the user chats with
+    a single orchestrator agent ("how's feature 12 going? please add
+    tests for the auth flow") that owns the backlog and dispatches
+    sub-agents. Closer to Chase's "talk to the orchestrator, not the
+    coder" pattern.
+
+### Tier 11 — always-on / event-driven (Chase's biggest predicted unlock)
+
+33. **Trigger surface.** Add a small dispatcher process that watches
+    one or more event sources — local file (drop a brief into
+    `inbox/`), GitHub webhook, a polled HTTP endpoint, even
+    `chokidar` on a folder — and starts an orchestrator session per
+    event. The body of the trigger becomes the bootstrapper input.
+    The harness wakes itself up.
+34. **Approval-gated reply pattern.** For event sources that produce
+    user-facing replies (email, Slack, GitHub PR comments), the agent
+    drafts the response, the harness shows it for one-click approve or
+    edit before it goes out. Mirrors Chase's email-agent example.
+    Reuses the HITL gate from Tier 7.
+35. **Cost-class routing.** The orchestrator picks a smaller / cheaper
+    model for the high-frequency event paths and the configured
+    "premium" model only when the event escalates. This is also where
+    the Nemotron-coalition pattern (frontier orchestrator + open
+    sub-agents) lives — see Tier 12.
+
+### Tier 12 — agent identity & credentials
+
+This is the enterprise blocker Chase calls out specifically: *whose
+credentials does the agent use?* For a single-user local tool today,
+the answer is "the user's" by default, which is fine. The moment the
+harness is shared, it stops being fine.
+
+36. **Per-agent identity record.** Add `agent_identities(id, name,
+    description, owner_user, created_at)` and require every spawned
+    Pi session to be associated with an identity (defaulting to a
+    "system" identity for backward compatibility). Surface the
+    identity in every log line and SSE event.
+37. **Scoped credentials per identity.** Move provider auth (LM Studio
+    API key, future MCP-server auth, future GitHub tokens for the
+    event trigger) from "ambient process env" to "looked up by agent
+    identity at session start". Identities have credentials; processes
+    don't.
+38. **Audit trail keyed by identity.** Every `agent_logs` row gets an
+    `identity_id` foreign key. The activity panel can filter by
+    identity. Compliance / "what did Tom the marketing agent do
+    yesterday?" becomes a query, not a forensic trawl.
+39. **Revocation primitive.** A single setting that disables an
+    identity, blocks any in-flight session running under it, and
+    refuses new sessions until re-enabled. Cheap to implement, very
+    expensive *not* to have when something goes wrong.
+
+### Tier 13 — evaluation-driven development (start small)
+
+Per Chase: 5–10 scenarios is enough to start. Don't wait for 1,000.
+
+40. **`tests/evals/` directory.** Each eval is a JSON file:
+    `{ project_brief, expected_features_min, expected_files_present,
+    expected_build_passes, max_turns_total }`. The harness has an
+    `npm run eval` script that spins up a clean project per scenario,
+    runs the bootstrapper + orchestrator, asserts the expected
+    outcomes, and writes a one-line pass/fail to stdout.
+41. **Eval as CI gate.** Block merges to main when fewer than N of the
+    eval scenarios pass. Cheap protection against prompt regressions —
+    which are otherwise invisible until users complain.
+42. **Eval expansion from production.** When a real LocalForge run does
+    something surprising — good or bad — the activity panel gets a
+    "save as eval scenario" button that captures the chat, prompt
+    settings, and observed outcome. The eval suite grows from real
+    use, exactly as Chase describes.
+
 ---
 
 ## 13. Bottom line
@@ -730,21 +913,40 @@ and the harness (everything else). Its scope today is "build a small app
 end-to-end on a local model with auto-continue", and within that scope it
 works.
 
-To honestly call itself a "long-running, self-evolving agentic harness" it
-needs six things, in this order:
+By the canonical pattern Harrison Chase identifies — *loop + tools +
+file system + planning + sub-agents* — LocalForge has the loop and the
+tools, has only the *target-code* half of the file system, has planning
+that finalises at minute zero, and has no sub-agents at all. Three out
+of five primitives are partially or fully missing.
 
-1. Durable Pi sessions (Tier 1).
-2. A writable agent memory + failure feedback loop (Tier 2).
-3. Real verification gates (Tier 3).
-4. Sub-agent delegation (Tier 8) — closes the biggest single gap relative
-   to current state-of-the-art coding harnesses.
-5. File system as a memory substrate, not just a tool surface (Tier 9).
-6. MCP and per-tool permissions (Tier 5).
+To honestly call itself a "long-running, self-evolving deep agent
+harness" it needs the following, in this order:
 
-Tiers 4, 6, and 7 are the polish that takes it from "ambitious local-first
-harness" to "production-grade autonomous engineering platform". They are
-worth doing in that order, but only after the six load-bearing tiers
-above land — each of those is a prerequisite for the next.
+1. **Durable Pi sessions** (Tier 1) — agents survive restarts.
+2. **A writable agent memory + failure feedback loop** (Tier 2) — agents
+   leave behind something useful for the next agent.
+3. **Real verification gates + a small eval suite** (Tier 3 + Tier 13)
+   — the harness can tell the difference between a good run and a bad
+   one. Per Chase: start with 5–10 scenarios, not 1,000.
+4. **Synchronous sub-agent delegation** (Tier 8) — closes the biggest
+   single gap relative to current SOTA coding harnesses.
+5. **File system as a memory substrate, not just a tool surface**
+   (Tier 9) — the canonical pattern.
+6. **MCP and per-tool permissions** (Tier 5) — third-party tool surface.
+
+Tiers 4, 6, 7, 10, 11, 12 are the next horizon — better planning,
+distributed control plane, HITL polish, async sub-agents, always-on /
+event-driven triggers, and agent identity. These are what take LocalForge
+from "complete narrow harness" to "Chase-shaped deep-agent platform".
+Each is worth doing, but only after the six load-bearing items above
+land — each of those is a prerequisite for the next.
+
+The blunt summary: LocalForge today is a competent *narrow* harness in a
+field that is rapidly standardising on a *deep* one. Closing that gap is
+not a research project — every primitive that's missing has a working
+reference implementation in the public domain (Claude Code, LangGraph,
+Anthropic's memory tool, OpenClaw, Symphony). The work is integration,
+not invention.
 
 ---
 
@@ -771,3 +973,5 @@ above land — each of those is a prerequisite for the next.
 - [Memory tool — Claude API Docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
 - [Effective context engineering for AI agents — Anthropic](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
 - [Using agent memory — Claude API Docs](https://platform.claude.com/docs/en/managed-agents/memory)
+- [Harrison Chase on deep agents, async sub-agents, and agent identity — NVIDIA AI Podcast (2026)](https://www.youtube.com/watch?v=c-fsL0gsmo0) — primary source for the deep-agent fingerprint, the 9-month re-architecture cadence, the skills-as-Markdown-plus-scripts framing, and the always-on / agent-identity directions cited throughout this document
+- [Deep Agents — LangChain blog](https://blog.langchain.com/) (search "deep agents")
