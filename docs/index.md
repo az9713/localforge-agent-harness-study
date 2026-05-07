@@ -17,6 +17,7 @@ LocalForge is a local-first autonomous coding harness: you describe an app, it t
 | [Agent runner](concepts/agent-runner.md) | How the child process talks to Pi, writes code, verifies, and reports back |
 | [Pi integration](concepts/pi-integration.md) | Where Pi sits, when it's invoked, how it's configured, and what it does (and doesn't) own |
 | [System design](architecture/system-design.md) | Runtime components, data flows, and design decisions |
+| [Agent harness analysis](architecture/agent-harness-analysis.md) | LocalForge scored against the canonical agent-harness requirements, with a prioritised path to long-running and self-evolving |
 | [Runtime settings](reference/runtime-settings.md) | Global settings, project overrides, environment variables, and package scripts |
 | [Common issues](troubleshooting/common-issues.md) | Model, database, server, agent, and verification failures |
 
