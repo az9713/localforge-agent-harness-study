@@ -20,10 +20,15 @@
 
 | If you want to… | Read |
 |---|---|
-| Understand what an agent harness *is* and how to evaluate one | [**Agent harness analysis**](docs/architecture/agent-harness-analysis.md) — the headline document |
+| **Design or build** a harness from scratch (vendor-neutral reference) | [**Agent harness blueprint**](docs/architecture/agent-harness-blueprint.md) — the prescriptive spec: 12 components, 9 file formats, 5 inter-component contracts, 7-tier maturity ladder, hello-harness pseudocode |
+| **Evaluate** an existing harness against the blueprint | [**Agent harness analysis**](docs/architecture/agent-harness-analysis.md) — LocalForge graded against the blueprint, with a prioritised upgrade path |
 | Understand how Pi (`@mariozechner/pi-coding-agent`) plugs into a harness | [Pi integration deep-dive](docs/concepts/pi-integration.md) |
 | Run the harness yourself | [Quick start](#quick-start) below |
 | Read the full onboarding docs (architecture, lifecycle, settings, troubleshooting) | [`docs/index.md`](docs/index.md) |
+
+The blueprint and the analysis are paired siblings: **what *should* exist**
+vs **what currently exists**. Read the blueprint to design; read the
+analysis to assess.
 
 ---
 

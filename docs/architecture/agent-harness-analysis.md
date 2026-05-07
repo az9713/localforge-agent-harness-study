@@ -1,5 +1,14 @@
 # LocalForge as an agent harness — an objective analysis
 
+> **Read this with its prescriptive sibling.** This document is the
+> *audit*: LocalForge scored against the canonical pattern. The
+> *blueprint* —
+> [`agent-harness-blueprint.md`](agent-harness-blueprint.md) — is the
+> vendor-neutral reference that defines the pattern itself
+> (requirements, contracts, file formats, maturity ladder). Use the
+> blueprint to design or build a harness; use this analysis to see one
+> graded against it.
+
 > **Scope.** This document evaluates LocalForge against the canonical
 > requirements of an "agent harness" as the term has crystallised in 2025-2026
 > writing from OpenAI, LangChain, Martin Fowler, MongoDB, and the
