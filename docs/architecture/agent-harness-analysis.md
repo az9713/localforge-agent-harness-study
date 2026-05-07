@@ -324,7 +324,202 @@ What's missing at the tool layer:
 
 ---
 
-## 8. Honest critique
+## 8. Planning — does it really work?
+
+**Short answer: it plans once, up front, and never replans.**
+
+LocalForge does have a real planning step, and it is one of the more
+interesting harness design choices in the codebase: planning is just
+*another Pi session*, but with a tool surface restricted to feature-CRUD
+operations. The bootstrapper agent reads the chat transcript and emits one
+`create_feature` call per feature, with `depends_on` edges encoding the
+dependency graph. That is genuine plan synthesis, not template
+expansion — and the dependency edges are honoured by the scheduler at
+runtime, which is the half of "planning" most harnesses get wrong.
+
+Where the harness stops short:
+
+- **Plan is final.** Once the backlog is generated, nothing in the runtime
+  ever revisits it. There is no monitor that says "three features in a
+  row failed, the original decomposition is wrong, replan". The harness
+  treats the bootstrapper's output as ground truth.
+- **No goal hierarchy.** Features are flat. There are no epics, no
+  milestones, no parent/child relationships. A real product is a tree of
+  intent; LocalForge stores it as a list with edges.
+- **No artefact.** There is no `PLAN.md` written to disk that humans can
+  inspect, edit, or that future agents can read. The plan exists only as
+  rows in the `features` table. Compare with the
+  [awesome-harness](https://github.com/ai-boost/awesome-harness-engineering)
+  pattern of milestone-based artefacts (`Plan.md` ↔ `Implement.md`) and
+  the now-common Claude-Code convention of an editable plan in the repo.
+- **No re-decomposition during execution.** The coding agent's system
+  prompt explicitly tells it *not* to ask the user questions and to make
+  reasonable assumptions instead. There is no path for it to say
+  "this feature is actually three sub-features" and have the harness
+  break it apart.
+- **No pre-flight check.** The harness does not call back to a planner
+  before each feature to ask "given what we've now built, is this
+  feature still well-defined?". The plan written at minute zero is the
+  plan executed at minute three hundred.
+
+In the canonical taxonomy this is "plan-then-execute", which is the
+weakest of the three planning patterns (plan-then-execute → ReAct →
+hierarchical-planner-with-replanning). It works for small, self-similar
+projects where the bootstrapper got it right the first time. It does not
+adapt.
+
+---
+
+## 9. Sub-agents — does it really work?
+
+**Short answer: no. There are no sub-agents.**
+
+This is worth being precise about, because LocalForge *does* run multiple
+Pi sessions, and a casual reader could mistake that for a multi-agent
+system. It isn't.
+
+The literature distinguishes two patterns, and LocalForge supports
+neither:
+
+- **Sub-agents** (hierarchical delegation). A parent agent in the middle
+  of its own loop spawns a subordinate agent with its own context window,
+  its own system prompt, and a focused brief — "review this PR", "find
+  callers of this function", "research API X". The subordinate runs to
+  completion and returns a summary that the parent integrates back into
+  its own working context. This is the
+  [Claude Code Task tool](https://code.claude.com/docs/en/sub-agents)
+  pattern (up to 7 parallel sub-agents per main agent), the
+  [LangGraph supervisor](https://github.com/langchain-ai/langgraph-supervisor-py)
+  pattern, and the [Google ADK](https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/)
+  hierarchical agent tree.
+- **Agents-as-tools** (function-call style). A specialised agent is
+  packaged behind a tool schema — `code_review(diff)` returns a review
+  object, `web_research(question)` returns a summary. The caller never
+  sees the inner agent's loop; from its perspective it called a tool that
+  happened to be expensive.
+
+LocalForge has neither, because:
+
+- The Pi session inside `agent-runner.mjs` is given the built-in toolset
+  (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) and **nothing
+  else**. There is no `delegate(brief)` tool, no `code_review(diff)` tool,
+  no `research(question)` tool. Pi cannot invoke another Pi.
+- The orchestrator's "concurrent agent slots" are *peer* sessions: each
+  one runs a different feature. They share no parent context, do not
+  return summaries to one another, and do not participate in any joint
+  task. They are siblings, not a supervisor + subordinates.
+- Pi itself does have a primitive that could expose sub-agents
+  (`customTools` + `defineTool`), and LocalForge already uses it for the
+  feature-CRUD tools. The technical lift to wrap a Pi session as a tool
+  exists today and is not used.
+
+The consequences are concrete:
+
+- **Context bloat.** Long-running coding sessions accumulate read-file
+  outputs, grep results, and bash logs in the same context window the
+  model is using to reason. A sub-agent could absorb a 300-line file
+  into its own context, return a 5-line summary, and keep the parent's
+  context clean. LocalForge has no such mechanism.
+- **No specialisation.** Every Pi session is the same generalist agent
+  with the same system prompt. There is no "test-writer" Pi, no
+  "code-reviewer" Pi, no "researcher" Pi. The prompt has to cover every
+  job, which weakens it for each one.
+- **No parallelism within a feature.** The harness can run three
+  features in parallel via slots, but it cannot run "implement + test +
+  document" in parallel within one feature, because there is no parent
+  to coordinate the three sub-tasks.
+
+This is the single most impactful gap relative to current state-of-the-
+art coding harnesses. Anthropic's Claude Code, OpenAI's Codex/Symphony,
+and most production LangGraph deployments rely heavily on sub-agent
+delegation; LocalForge has not yet adopted the pattern at all.
+
+---
+
+## 10. File system access — does it really work?
+
+**Short answer: as a tool surface yes, as a memory substrate no.**
+
+The file system has *two* roles in modern coding harnesses, and they
+should be evaluated separately.
+
+### Role 1 — file system as the tool surface (🟢 covered)
+
+This is "the agent reads and writes source code". LocalForge handles this
+well:
+
+- The full Pi built-in toolset is enabled for coding sessions: `read`,
+  `write`, `edit`, `bash`, `grep`, `find`, `ls`. These are
+  schema-validated tools with structured outputs that Pi feeds back as
+  observations.
+- The runner sets `cwd` to the project folder
+  (`projects/<slug>/`) and the system prompt asserts that this is the
+  workspace.
+- Every `write`/`edit`/`bash` is checked by the workspace-guard
+  extension (`makeWorkspaceGuardExtension`) before execution. Paths are
+  resolved (with MSYS-style normalisation on Windows), and anything
+  resolving outside the project root is rejected. Bash commands are
+  scanned for absolute paths that would escape the workspace, with
+  exemptions for `/dev/null`, `/tmp/`, `/usr/`, etc.
+- Broad `node`-killers (`taskkill /F /IM node.exe`, `killall node`,
+  certain `pkill -f node` shapes) are blocked because they would crash
+  the harness server itself.
+
+This is genuine harness work — not just "we let the model write files",
+but "we let the model write files and we check every path against a
+containment policy first". Many harnesses don't do the second half.
+
+### Role 2 — file system as the memory substrate (🔴 not covered)
+
+This is the role the harness literature has converged on hardest in
+2025-2026. Anthropic shipped a [memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
+that gives the model a directory it can `create`, `read`, `update`,
+`delete` in across sessions. Claude Code maintains `CLAUDE.md`,
+`AGENTS.md`, and a per-project notes convention. Anthropic's
+"[Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)"
+post and the "Auto Dream" memory consolidation feature both treat the
+file system as the agent's writable, persistent state — not as the code
+under construction, but as the agent's *own* knowledge base. The pattern
+has a name in the awesome-harness taxonomy ("filesystem as foundational
+memory") and is at this point table-stakes.
+
+LocalForge does not implement any of this:
+
+- There is **no agent-writable memory file**. No `AGENT_NOTES.md`, no
+  `CLAUDE.md`, no `.localforge/notes/`. The agent can `write` such a
+  file (the tool layer doesn't forbid it), but no future Pi session is
+  configured to read it. The system prompt is built from static
+  templates and the project's `coder_prompt` setting; project-folder
+  files are not auto-injected.
+- There is **no skills directory wired in**. The repo ships a
+  `.agents/skills/` folder (frontend-design, localforge, playwright-cli,
+  skill-creator) but the runner explicitly tells Pi `noSkills: true`.
+  These files are inert from the agent's perspective.
+- There is **no consolidation** ("Auto Dream"). Even if the agent did
+  write notes, there is no scheduled compaction step that would prune
+  stale entries, merge duplicates, or summarise lessons.
+- The **project's own files are not used as agent memory either**.
+  Pi sees the source code as the *target*, not as a memory of decisions.
+  There is no `DECISIONS.md`, no `RUNBOOK.md`, no `.agent-state.json`
+  that the harness would surface to subsequent runs.
+- The **chat_messages table** persists bootstrapper conversation but is
+  not surfaced to the coding agent. Once the backlog is generated, the
+  coding agent never sees the original user intent.
+
+**Why this matters more than the other gaps.** Memory and the file
+system are the two things that turn a stateless tool-loop into something
+that learns. Anthropic's framing is that "files are a new kind of
+memory" — not metaphorically, literally — and modern long-running
+harnesses treat the workspace directory as a hybrid of "code under
+construction" and "agent's notebook". LocalForge has the former and not
+the latter.
+
+The fix is small — Tier 2 in the recommendations below covers it — but
+the absence is structural.
+
+---
+
+## 11. Honest critique
 
 LocalForge is best understood as a **demo-quality coding harness** that
 takes the unusual stance of being entirely local-model driven. Within that
@@ -363,7 +558,7 @@ The *integrity* of the harness is good. The *ambition* is small.
 
 ---
 
-## 9. Recommendations — making LocalForge a real long-running, self-evolving harness
+## 12. Recommendations — making LocalForge a real long-running, self-evolving harness
 
 Below is a concrete, prioritised path. Each item is sized so that a
 LocalForge-built feature could implement it.
@@ -478,9 +673,56 @@ These are cheap to implement and unlock everything else.
     activity panel and let the user one-click reject. Small UX project,
     big trust win.
 
+### Tier 8 — sub-agents (close the biggest single gap)
+
+23. **Wrap a Pi session as a tool.** Define a `delegate(brief, tools[])`
+    custom tool that, when called by the parent Pi session, spawns a
+    fresh Pi session with its own context window, system prompt, and
+    restricted toolset, runs it to completion, and returns the final
+    assistant text as the tool result. This is the
+    [Claude Code Task tool](https://code.claude.com/docs/en/sub-agents)
+    pattern reproduced inside LocalForge.
+24. **Specialised sub-agent profiles.** Ship a small set of opinionated
+    sub-agent configs the parent can target by name: `code-reviewer`
+    (read-only, no bash, gets a diff), `test-writer` (read + write to
+    `tests/` only), `researcher` (read + grep + bash, no write). Each
+    has a focused system prompt that the generalist coding agent can
+    delegate to.
+25. **Parallel sub-agents within one feature.** Allow the parent to
+    issue multiple `delegate` calls concurrently. Today's "agent slots"
+    are inter-feature parallelism; this is intra-feature parallelism, and
+    it's where the wall-clock wins compound. Cap at 3 concurrent
+    sub-agents per parent to match the existing concurrency cap.
+26. **Sub-agent context isolation.** Each delegated session gets its own
+    in-memory `SessionManager`. The parent never sees the sub-agent's
+    raw tool outputs — only the final summary. This is the same
+    "absorb-then-summarise" trick that keeps Claude Code's main
+    conversation clean during deep file searches.
+
+### Tier 9 — file system as memory substrate
+
+27. **Auto-include `AGENT_NOTES.md` in the system prompt.** Tier 2
+    item #5 introduces the file; this item makes the harness *read* it
+    on every coding-session start and prepend it to the system prompt
+    behind a clearly-labelled section. Anthropic's
+    [memory tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
+    is the same idea formalised.
+28. **Auto-Dream consolidation pass.** A scheduled (or
+    on-project-completion) Pi session that reads the project's notes,
+    failure summaries, and per-feature lessons and rewrites them into
+    a deduplicated, contradiction-free knowledge file. Anthropic's
+    "Auto Dream" is the reference. The cost is one extra Pi run per
+    project; the benefit is that the knowledge file stays useful as it
+    grows.
+29. **Surface bootstrapper chat to coding sessions.** Today the
+    `chat_messages` rows are dropped after the backlog is generated.
+    Append a short summary of the original user intent to every coding
+    session's prompt — the agent should know *why* a feature exists, not
+    just *what* it is.
+
 ---
 
-## 10. Bottom line
+## 13. Bottom line
 
 LocalForge is a **real harness** — narrow, correct, and observable, with a
 genuine permission layer and a clean separation between the model SDK (Pi)
@@ -489,17 +731,20 @@ end-to-end on a local model with auto-continue", and within that scope it
 works.
 
 To honestly call itself a "long-running, self-evolving agentic harness" it
-needs four things, in this order:
+needs six things, in this order:
 
 1. Durable Pi sessions (Tier 1).
 2. A writable agent memory + failure feedback loop (Tier 2).
 3. Real verification gates (Tier 3).
-4. MCP and per-tool permissions (Tier 5).
+4. Sub-agent delegation (Tier 8) — closes the biggest single gap relative
+   to current state-of-the-art coding harnesses.
+5. File system as a memory substrate, not just a tool surface (Tier 9).
+6. MCP and per-tool permissions (Tier 5).
 
 Tiers 4, 6, and 7 are the polish that takes it from "ambitious local-first
 harness" to "production-grade autonomous engineering platform". They are
-worth doing in that order, but only after the first four tiers land — each
-of those is a load-bearing prerequisite for the next.
+worth doing in that order, but only after the six load-bearing tiers
+above land — each of those is a prerequisite for the next.
 
 ---
 
@@ -518,3 +763,11 @@ of those is a load-bearing prerequisite for the next.
 - [A Survey of Self-Evolving Agents — arXiv 2507.21046](https://arxiv.org/html/2507.21046v3)
 - [SAGE: Self-evolving Agents with Reflective and Memory-augmented Abilities — arXiv 2409.00872](https://arxiv.org/html/2409.00872v2)
 - [Hermes Agent: Self-Improving AI with Persistent Memory — YUV.AI](https://yuv.ai/blog/hermes-agent)
+- [Where to use sub-agents versus agents as tools — Google Cloud](https://cloud.google.com/blog/topics/developers-practitioners/where-to-use-sub-agents-versus-agents-as-tools/)
+- [Create custom subagents — Claude Code Docs](https://code.claude.com/docs/en/sub-agents)
+- [Subagents in the SDK — Claude API Docs](https://platform.claude.com/docs/en/agent-sdk/subagents)
+- [LangGraph Supervisor — GitHub](https://github.com/langchain-ai/langgraph-supervisor-py)
+- [Developer's guide to multi-agent patterns in ADK — Google](https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/)
+- [Memory tool — Claude API Docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool)
+- [Effective context engineering for AI agents — Anthropic](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+- [Using agent memory — Claude API Docs](https://platform.claude.com/docs/en/managed-agents/memory)
