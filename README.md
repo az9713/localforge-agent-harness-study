@@ -101,8 +101,8 @@ Three reasons it's a useful specimen:
 ### 3. Install and run
 
 ```bash
-git clone https://github.com/az9713/localforge-tutorial.git
-cd localforge-tutorial
+git clone https://github.com/az9713/localforge-agent-harness-study.git
+cd localforge-agent-harness-study
 npm install
 npm run db:migrate
 npm run dev
