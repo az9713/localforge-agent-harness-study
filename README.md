@@ -22,6 +22,7 @@
 |---|---|
 | **Design or build** a harness from scratch (vendor-neutral reference) | [**Agent harness blueprint**](docs/architecture/agent-harness-blueprint.md) — the prescriptive spec: 12 components, 9 file formats, 5 inter-component contracts, 7-tier maturity ladder, hello-harness pseudocode |
 | **Evaluate** an existing harness against the blueprint | [**Agent harness analysis**](docs/architecture/agent-harness-analysis.md) — LocalForge graded against the blueprint, with a prioritised upgrade path |
+| **Build something** on top of this codebase + docs | [**High-impact projects**](docs/projects.md) — six solo-feasible, publishable projects this repo is uniquely positioned to undertake |
 | Understand how Pi (`@mariozechner/pi-coding-agent`) plugs into a harness | [Pi integration deep-dive](docs/concepts/pi-integration.md) |
 | Run the harness yourself | [Quick start](#quick-start) below |
 | Read the full onboarding docs (architecture, lifecycle, settings, troubleshooting) | [`docs/index.md`](docs/index.md) |

@@ -19,6 +19,7 @@ LocalForge is a local-first autonomous coding harness: you describe an app, it t
 | [System design](architecture/system-design.md) | Runtime components, data flows, and design decisions |
 | [**Agent harness blueprint**](architecture/agent-harness-blueprint.md) | Vendor-neutral reference for the agent-harness pattern — what *should* exist, regardless of implementation. The prescriptive sibling of the analysis below. |
 | [Agent harness analysis](architecture/agent-harness-analysis.md) | LocalForge scored against the blueprint, with a prioritised path to long-running and self-evolving |
+| [High-impact projects](projects.md) | Six solo-feasible, publishable projects this codebase + docs make uniquely well-positioned to undertake |
 | [Runtime settings](reference/runtime-settings.md) | Global settings, project overrides, environment variables, and package scripts |
 | [Common issues](troubleshooting/common-issues.md) | Model, database, server, agent, and verification failures |
 
