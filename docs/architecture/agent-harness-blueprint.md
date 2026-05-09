@@ -43,8 +43,11 @@ Anthropic's seven harness-engineering posts (managed agents,
 long-running harnesses, harness design, scientific computing, parallel
 Claudes, context engineering, memory tool), OpenAI's harness work
 (harness engineering, Symphony, Shell + Skills + Compaction, the
-25-hour Codex run), Martin Fowler, LangChain's "Anatomy of an Agent
-Harness" and "Deep Agents", MongoDB, Google ADK, and the
+25-hour Codex run), Factory's
+[Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o)
+talk (Missions, validation contracts, structured handoffs), Martin
+Fowler, LangChain's "Anatomy of an Agent Harness" and "Deep Agents",
+MongoDB, Google ADK, and the
 [awesome-harness-engineering](https://github.com/ai-boost/awesome-harness-engineering)
 taxonomy. References are listed in §X with a one-line synthesis note
 per source.
@@ -124,6 +127,8 @@ sense.
 | S3 | **Skills library** | A harness SHOULD expose reusable capability bundles to the agent. Each bundle is a Markdown manifest plus scripts; the agent sees only the manifest until it invokes the skill. |
 | S4 | **Memory substrate** | A harness SHOULD provide persistent, agent-writable state outside the conversation context, surfaced into the system prompt on each session start. |
 | S5 | **Compaction** | A harness SHOULD compact the conversation continuously as it grows, not as an emergency response when the context window fills. |
+| S6 | **Validation contract** | A harness SHOULD persist an explicit *validation contract* — product, technical, and UX assertions that define correctness *before* implementation begins. Validators use the contract as the authority for pass/fail decisions; the contract is updated only through explicit rescoping by the orchestrator, never by the worker that wrote the code under review. |
+| S7 | **Structured handoff** | Every worker and validator handoff SHOULD be a fixed-shape, machine-readable document — completed work, left-undone items, commands with exit codes, discovered issues, contract-coverage status, gate recommendation. Free-form "done" prose is not a sufficient handoff for any task that crosses a session or role boundary. |
 
 **MAY — frontier capabilities not yet table-stakes:**
 
@@ -280,6 +285,8 @@ T6 cell is at the frontier of what has shipped publicly.
 | **S3** | Skills library | Prompt sprawl | OpenAI `SKILL.md`, Claude Skills | None | Markdown manifest + scripts (T0 of skills) | Auto-evolved skills + cross-project skill transfer | §V.6 |
 | **S4** | Memory substrate | Sessions start cold | Anthropic memory tool, OpenAI four-file durable memory | None | Four-file durable memory + CHANGELOG with failed approaches | Auto-Dream + cross-project memory | §V.1–5 |
 | **S5** | Compaction | Context exhaustion | OpenAI `/responses/compact`, Claude context-engineering | None | Continuous compaction + periodic context resets | Compaction + memory + reset triadic loop | (no artefact) |
+| **S6** | Validation contract | Tests confirm implementation, not intent | Factory Missions, Anthropic sprint contracts | None | Project-level contract: product/technical/UX assertions mapped to features | Hundreds of assertions, scrutiny + user-testing split per assertion, contract-as-eval-fixture | §V.10 |
+| **S7** | Structured handoff | "Done" as the handoff | Factory Missions worker/validator templates | None | Worker + validator handoff templates, Markdown | Mandatory at every transfer; orchestrator gates on parsed fields | §V.11 |
 | **Y1** | Async sub-agents | Synchronous blocking | (not yet shipped publicly at scale) | N/A | N/A | Fire-and-monitor + manager UI | (contract §VI.4) |
 | **Y2** | Event triggers | Click-driven only | (early Anthropic / OpenAI work; Chase prediction) | N/A | N/A | Inbox + webhook + watcher dispatch | §V.7 |
 | **Y3** | Per-agent identity | Cross-agent credential leakage | Anthropic Managed Agents creds split, OpenClaw identity | Process-as-user | Per-agent identity record + audit | Scoped credentials + revocation primitive | (no artefact, config) |
@@ -571,6 +578,139 @@ restarted session can replay completed calls as cached results.
 mechanism needs the actual bytes the agent saw.
 
 **Vendor instance.** Anthropic Managed Agents session log; LangSmith trace events.
+
+### V.10 Validation contract artefact
+
+**Role.** The list of assertions a successful run must satisfy,
+written *before* any code, independent of implementation. The single
+authority validators use for pass/fail decisions. Distinct from §V.1
+(`Prompt.md`, the goal); from §V.2 (`Plan.md`, the decomposition);
+and from §V.4–5 (the running narrative and the failure log). The
+contract is *what success looks like*, not *what we did* or *how to
+build it*.
+
+**Required sections:**
+- `# Validation Contract`
+- `## Product assertions` — user-visible behaviour that must be true
+  (`VC-P01`, `VC-P02`, …).
+- `## Technical assertions` — type/lint/test/build/performance/data/
+  integration/security properties (`VC-T01`, …).
+- `## UX assertions` — end-to-end flows the user-testing validator
+  must exercise (`VC-U01`, …).
+- `## Coverage matrix` — per assertion: feature(s), validator type
+  (`scrutiny` | `user-testing`), required evidence.
+
+**Example fragment:**
+
+```markdown
+## Product assertions
+- VC-P01: A signed-in user can post a message and see it appear within 1s.
+- VC-P02: An offline client queues outbound messages and flushes on reconnect.
+
+## Coverage matrix
+| Assertion | Feature(s) | Validator      | Evidence required             |
+| --------- | ---------- | -------------- | ----------------------------- |
+| VC-P01    | F12, F18   | user-testing   | Passing flow transcript       |
+| VC-T03    | F18        | scrutiny       | `npm test -- messaging` exit 0|
+```
+
+**Critical.** Updated only through explicit rescoping by the
+orchestrator (with the planner). NEVER updated by the worker that
+wrote the code under review. The harness MUST treat any worker write
+to this file as a violation and reject it at the tool layer.
+
+**Anti-pattern.** Acceptance criteria phrased as goals
+("the messaging works well") rather than tests
+("`VC-T03: npm test -- messaging` returns exit 0"). For complex
+projects the contract can hold hundreds of assertions; if it cannot
+be mechanically checked, it is decoration.
+
+**Vendor instance.** Factory's `Validation Contract` from
+[The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o);
+related but narrower: Anthropic's per-sprint contracts from
+[Harness design for long-running app development](https://www.anthropic.com/engineering/harness-design-long-running-apps).
+
+### V.11 Structured handoff artefact
+
+**Role.** A fixed-shape, machine-readable summary every worker and
+every validator emits when it finishes, so the next role can pick up
+cold without inferring state from chat history. Two templates cover
+all role-to-role transfers in a deep-agent system: the worker
+handoff and the validator handoff. Both are also the payload for the
+inter-component contracts in §VI.3 (sub-agent → parent) and §VI.5
+(evaluator → harness).
+
+**Worker handoff — required sections:**
+
+```markdown
+## Worker Handoff
+
+Feature: <feature id and title>
+Commit: <commit hash or patch identifier>
+
+### Completed
+- <Concrete work completed.>
+
+### Left undone
+- <Known incomplete item, or "None".>
+
+### Commands run
+| Command | Exit code | Notes |
+| ------- | --------: | ----- |
+| `<cmd>` | 0         | <relevant output summary> |
+
+### Issues discovered
+- <Bug, ambiguity, test failure, architectural concern, or "None".>
+
+### Validation contract coverage
+- Satisfied: <assertion ids believed satisfied>
+- Needs validator attention: <assertion ids requiring deeper review>
+
+### Procedure compliance
+- Followed assigned scope: yes/no
+- Modified only allowed areas: yes/no
+- Requires orchestrator rescope: yes/no
+```
+
+**Validator handoff — required sections:**
+
+```markdown
+## Validator Handoff
+
+Milestone: <milestone id>
+Validator type: scrutiny | user-testing
+
+### Result
+pass | fail | pass-with-follow-up
+
+### Evidence
+- <Command outputs, screenshots, logs, reviewed files, tested flows.>
+
+### Failed assertions
+| Assertion | Evidence | Recommended follow-up |
+| --------- | -------- | --------------------- |
+| VC-U01    | <what failed> | <new feature/fix task> |
+
+### New risks
+- <Risk found during validation, or "None".>
+
+### Gate recommendation
+- continue | create follow-up feature | rescope milestone | escalate to human
+```
+
+**Critical.** The orchestrator gates progress on the parsed fields
+of the handoff. Missing or malformed handoffs MUST block the gate.
+"Done" as a handoff is not a handoff.
+
+**Anti-pattern.** Free-form prose summaries with no exit codes, no
+command list, no assertion mapping. The next agent cannot reliably
+resume; the orchestrator cannot reliably gate; the human cannot
+reliably audit.
+
+**Vendor instance.** Factory's worker- and validator-handoff
+templates from [The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o).
+Closely related: any sub-agent return participating in §VI.3 or
+§VI.5 SHOULD conform to the relevant template above.
 
 ---
 
@@ -898,20 +1038,31 @@ behaviour the second time, because the failure log was read in.
 **Real-system citation:** OpenAI four-file durable memory pattern;
 Anthropic `CHANGELOG.md`.
 
-### Tier 3 — Verification depth and Generator-Evaluator
+### Tier 3 — Verification depth, validation contract, and Generator-Evaluator
 
 **Adds:** Real test suite invocation; type-check gate; lint gate; a
 small (5–10 scenario) eval suite run on CI; Y4 Generator-Evaluator
-pair on every coding session.
+pair on every coding session; **S6 validation contract (§V.10)
+written before any code, validators read it as the pass/fail
+authority**; **S7 structured worker and validator handoffs (§V.11)
+parsed by the orchestrator at every gate**; **two-validator split**
+(scrutiny + user-testing) per the Factory Missions pattern at the
+top of T3.
 
 **Anti-patterns:** Verification = "page has a title"; eval = "we'll
-do it later"; agent claims success counted as success.
+do it later"; agent claims success counted as success; tests written
+*after* implementation that confirm the implementation rather than
+the requirement (§IX.7); free-form "done" handoffs the orchestrator
+cannot mechanically parse.
 
 **Exit criteria:** A regressing prompt change is caught by the eval
-suite *before* it reaches a user, with a deterministic failure message.
+suite *before* it reaches a user, with a deterministic failure
+message. The validation contract holds; first-pass success rate on
+new features is measurable, not anecdotal.
 
 **Real-system citation:** Anthropic harness-design Generator-Evaluator;
-LangSmith eval suites.
+LangSmith eval suites; Factory Missions validation contract +
+worker/validator handoffs.
 
 ### Tier 4 — Sub-agents and skills
 
@@ -1138,6 +1289,63 @@ only, gets a diff), `test-writer` (writes only to `tests/`),
 edit-plan-only). The parent picks the profile in the `delegate` call
 (§VI.3).
 
+### IX.7 Post-hoc tests confirm implementation, not intent
+
+**Trigger.** "We achieved 90% coverage. We're good."
+
+**Why it fails.** Tests written after implementation are shaped by
+the code that already exists. They confirm the implementation works
+the way it does — not that the implementation does the right thing.
+A feature can pass exhaustive unit tests and still miss the original
+requirement, because the test author (often the same agent that
+wrote the feature) absorbed the same incorrect assumption about
+what success looks like.
+
+**Fix.** Write the validation contract (§V.10) before code. Tests
+are how the harness checks the contract; the contract is the
+authority, not the tests. The contract is updated only through
+explicit rescoping — never silently retrofitted to match the
+implementation.
+
+### IX.8 Naive parallel writes in software development
+
+**Trigger.** "Let's run 10 agents in parallel — we'll be 10× faster."
+
+**Why it fails.** In software development, parallel writers step on
+each other's changes, duplicate effort, and make inconsistent
+architectural choices. Coordination overhead can erase throughput
+gains while increasing token spend. The Anthropic C-compiler
+topology (T5 in §VII) works only because each agent had a
+specialised role, the shared bare git repo enforced conflict
+resolution, and lockfiles prevented duplicate task claims — i.e. it
+was *coordinated* parallelism, not naive parallelism.
+
+**Fix.** Default to serial writes. Reserve parallelism for read-only
+subtasks: codebase search, documentation research, independent code
+review, static analysis, test summarisation. If parallel writes are
+needed, adopt the full C-compiler topology (shared bare git +
+specialised roles + lockfiles) — not "spawn N copies of the same
+agent". Reference: [The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o).
+
+### IX.9 Hard-coded orchestration state machines
+
+**Trigger.** "Let's encode the planning logic in a deterministic
+state machine so it's predictable."
+
+**Why it fails.** Sutton's bitter lesson applies: a future model
+release can make hand-engineered orchestration logic obsolete in
+weeks. A state machine that took months to build and tune can be
+replaced by a better-prompted orchestrator agent the day a new
+model ships.
+
+**Fix.** Keep deterministic code thin. Use code for bookkeeping,
+gates, state, validation execution, and blocking rules. Keep
+planning, decomposition, implementation, and failure recovery in
+prompts and skills, where model improvements upgrade the system
+automatically. The harness owns the *contract* (validation contract,
+handoff schema, gate semantics); the model owns the *content*
+(plan, code, verdict, recovery strategy).
+
 ---
 
 ## X. Synthesised References
@@ -1178,6 +1386,7 @@ edit-plan-only). The parent picks the profile in the `delegate` call
 
 - [Harness design for long-running app development — Anthropic](https://www.anthropic.com/engineering/harness-design-long-running-apps) — Generator-Evaluator pattern (Y4); sprint contracts; "use model gains to simplify the harness".
 - [Harrison Chase on the NVIDIA AI Podcast](https://www.youtube.com/watch?v=c-fsL0gsmo0) — "5–10 eval scenarios is enough to start"; eval-as-product-design.
+- [The Multi-Agent Architecture That Actually Ships — Luke Alvoeiro, Factory](https://www.youtube.com/watch?v=ow1we5PzK-o) — Validation contract artefact (§V.10); structured worker and validator handoffs (§V.11); two-validator split (scrutiny + user-testing); five-pattern multi-agent taxonomy (delegation, creator-verifier, direct comm, negotiation, broadcast); "default to serial writes" execution policy for software development (§IX.8); "droid whispering" per-role model selection; "keep deterministic infrastructure thin" / bitter-lesson framing (§IX.9). Production datapoint: validation rarely succeeds on the first pass — treat follow-up features as a normal part of the loop.
 
 ### Observability
 

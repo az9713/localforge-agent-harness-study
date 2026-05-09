@@ -126,14 +126,15 @@ The rest of this document checks LocalForge against each of these.
 
 ---
 
-## 2. State of the practice — what Anthropic and OpenAI shipped, early 2026
+## 2. State of the practice — what Anthropic, OpenAI, and Factory shipped, early 2026
 
 Chase's framing tells us *what* the canonical pattern is. Anthropic's
-and OpenAI's recent engineering blogs tell us *what it looks like in
-production*. The patterns below are not theory — they are concrete
-primitives, file formats, and architectural choices that already exist
-in shipping systems. They are the bar against which any 2026-era harness
-should be measured.
+and OpenAI's recent engineering blogs, plus Factory's "Missions"
+architecture talk, tell us *what it looks like in production*. The
+patterns below are not theory — they are concrete primitives, file
+formats, and architectural choices that already exist in shipping
+systems. They are the bar against which any 2026-era harness should be
+measured.
 
 ### 2.1 The benchmark numbers
 
@@ -314,14 +315,120 @@ not as an emergency fallback**. Treating it as emergency-only causes
 restart behaviour and lost continuity; treating it as default keeps
 extended runs coherent without manual intervention.
 
-### 2.8 What this section means for LocalForge
+### 2.8 Factory's Missions architecture: validation contracts and structured handoffs
+
+A vendor-side complement to the Anthropic and OpenAI posts: Luke
+Alvoeiro of Factory gave a talk —
+[The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o) —
+that names and templates several patterns the other vendors imply but
+never quite articulate. The framing claim is that modern software
+engineering is no longer bottlenecked on model intelligence; it is
+bottlenecked on **human attention**. The architectural job is to turn
+attention into a planning-and-governance layer rather than a
+turn-by-turn execution bottleneck. Three contributions are
+load-bearing:
+
+**The validation contract as the central quality primitive.** Before
+any code is written, the orchestrator drafts a `Validation Contract`
+that lists product, technical, and UX assertions a successful run
+must satisfy — independent of any implementation. Each assertion is
+mapped to a feature, and validators use the contract as the single
+authority for pass/fail decisions. For complex projects the contract
+can contain hundreds of assertions. The contract is updated only
+through explicit rescoping; it is never silently retrofitted to match
+what the implementation happened to do. This closes the failure mode
+that post-hoc tests miss: a feature that passes exhaustive coverage
+because the tests test the *implementation*, not the *requirement*.
+Distinct from Anthropic's sprint contracts (per-sprint, narrower
+scope) and from acceptance criteria in `Plan.md` (per-milestone) —
+the validation contract spans the whole mission.
+
+**Structured handoffs as the long-term-memory mechanism.** Every
+worker and every validator emits a machine-readable handoff with a
+fixed shape: `Completed`, `Left undone`, `Commands run` (with exit
+codes), `Issues discovered`, `Validation contract coverage` (which
+assertions are believed satisfied vs need validator attention), and
+`Procedure compliance` (followed assigned scope yes/no, modified only
+allowed areas yes/no, requires orchestrator rescope yes/no).
+Validator handoffs add `Result` (pass | fail | pass-with-follow-up),
+`Failed assertions` with recommended follow-up, and a `Gate
+recommendation` (continue | create follow-up | rescope | escalate).
+For a multi-day mission, "I'm done" is not a sufficient handoff. The
+structured form is what lets the next agent (or human) pick up cold,
+and is what the orchestrator reads at every milestone gate.
+
+**Two distinct validators, not one.** Factory splits validation into
+*scrutiny* (conventional technical verification: tests, lint,
+typecheck, code review against the contract) and *user-testing* (live
+end-to-end exercise of the running app via Playwright-style
+automation, checking user-visible behaviour the scrutiny pass cannot
+see). Both run at every milestone gate. This is finer-grained than
+Anthropic's single Generator-Evaluator pair: scrutiny shares the
+static-analysis goal of an evaluator, but user-testing is a strictly
+different role with different tools, different failure modes, and
+different model strengths.
+
+**Other patterns named in the talk:**
+
+- **Multi-agent pattern taxonomy.** Five frontier patterns:
+  *delegation* (parent spawns child for bounded task),
+  *creator-verifier* (one builds, another independently checks),
+  *direct communication* (avoid — fragments state),
+  *negotiation* (agents coordinate over shared resources, best when
+  positive-sum), *broadcast* (one agent's state propagates to many —
+  critical for coherence). The Missions architecture composes
+  delegation + creator-verifier + broadcast and deliberately avoids
+  unconstrained direct agent-to-agent communication.
+- **Default to serial writes.** In software development specifically,
+  naive parallelism causes agents to step on each other's changes,
+  duplicate work, and make inconsistent architectural choices.
+  Coordination overhead can erase throughput gains while increasing
+  token spend. Reserve parallelism for *read-only* subtasks: codebase
+  search, API research, independent code review, static analysis,
+  test summarisation. The Anthropic C-compiler topology in §2.4 is
+  the *exception* (specialised roles + shared bare git +
+  lockfiles) — not the default.
+- **"Droid whispering" — per-role model selection.** No single
+  provider or model family is best at planning, implementing, and
+  validating. Validators in particular benefit from a different model
+  family from workers, to reduce shared blind spots. Keep the
+  architecture model-agnostic so each role can be tuned independently.
+- **Mission control dashboard.** A multi-day mission needs an
+  operational view — active worker, current milestone, contract
+  coverage, completed-vs-remaining work, budget burn, latest worker
+  and validator handoffs, blocked issues, follow-up features. A chat
+  transcript is the wrong control surface for this.
+- **Keep deterministic infrastructure thin.** The talk explicitly
+  invokes Sutton's bitter lesson: orchestration logic in prompts and
+  skills survives model improvements; orchestration logic in
+  hard-coded state machines becomes obsolete. Use code for
+  bookkeeping, gates, state, validation execution, and blocking
+  rules; use models and skills for planning, decomposition,
+  implementation, and failure recovery.
+
+**Production data points cited in the talk.** A Slack-clone mission
+spent ~60% of time and tokens on implementation; **validation
+almost never succeeded on the first pass** (follow-up features were
+the norm, not the exception); the final codebase had roughly half
+its lines of code in tests; coverage was around 90%; prompt caching
+was used heavily to amortise the cost of long-running sessions.
+These are directional evidence from one environment, not universal
+benchmarks — but the "first-pass validation rarely succeeds" finding
+is consistent with the Anthropic and OpenAI posts and is the
+strongest argument for treating follow-up features as a normal part
+of the loop, not as exceptional failure.
+
+### 2.9 What this section means for LocalForge
 
 The takeaway is that the canonical patterns are no longer abstract.
 They are: a four-file durable memory format, a `SKILL.md` manifest, an
 initializer-agent boot sequence, a `CHANGELOG.md` with failed-approach
-entries, generator-evaluator pairs, shared-git-with-lockfiles for
-parallel agents, brain/harness/hands/session decoupling, and compaction
-as a first-class primitive. Each maps to a concrete file, a concrete
+entries, generator-evaluator pairs, **scrutiny + user-testing
+two-validator splits**, **validation contracts written before
+implementation**, **structured worker and validator handoffs**,
+shared-git-with-lockfiles for parallel agents,
+brain/harness/hands/session decoupling, and compaction as a
+first-class primitive. Each maps to a concrete file, a concrete
 table column, a concrete API call, or a concrete container topology.
 
 LocalForge has *none* of them. The recommendations in §13 below are
@@ -983,6 +1090,27 @@ These are cheap to implement and unlock everything else.
      check as the last step of every coding-agent run; if any fail,
      the session is marked failed even if the agent itself claimed
      success.
+11e. **Two-validator pattern: scrutiny + user-testing.** Per
+     Factory's Missions architecture, split the single
+     Generator-Evaluator pair (item 11a) into two validators with
+     distinct roles. *Scrutiny* runs the same static review path
+     (read diff, run tests/lint/typecheck, render verdict against
+     the validation contract). *User-testing* exercises the live app
+     end-to-end via Playwright-style automation against the UX
+     assertions in the contract. The two run in parallel at every
+     milestone gate. Each emits its own structured handoff (item
+     26a). Reference: [The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o).
+11f. **Validation contract written before implementation.** A
+     project-level artefact (`projects/<slug>/.localforge/Validation.md`)
+     listing product, technical, and UX assertions a successful run
+     must satisfy, mapped to features. Authored by the bootstrapper
+     before the first coding session, updated only through explicit
+     rescoping. Validators consult the contract as the authority for
+     pass/fail; the agent never trusts its own claim of success.
+     Distinct from sprint contracts (item 14a, narrower scope) and
+     from acceptance criteria in `Plan.md` (per-milestone). For
+     complex projects this can hold hundreds of assertions.
+     Reference: Factory Missions.
 
 ### Tier 4 — better planning
 
@@ -1053,6 +1181,26 @@ These are cheap to implement and unlock everything else.
     Postgres mode behind a single connection-string setting so a team
     can share one harness. This is the biggest architectural change in
     the list and should be Postgres-or-stay-local, not both.
+20a. **Mission-control dashboard.** A multi-day mission needs an
+     operational view, not a chat transcript. Per Factory's
+     Missions, the minimum surface is: active worker/validator,
+     current feature and milestone, validation-contract coverage,
+     completed-vs-remaining work, budget burn, latest worker
+     handoff, latest validator handoff, blocked issues, follow-up
+     features created at the last gate, and human escalation
+     points. The existing kanban + activity panel are a starting
+     point; what's missing is the contract-coverage view and the
+     budget-burn / handoff-latest summary. Reference: [The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o).
+20b. **Default to serial writes, parallelise read-only work.** Per
+     Factory: in software development specifically, naive parallel
+     write agents step on each other and inflate token spend. Make
+     it explicit policy that LocalForge's "agent slots" run *one*
+     write-capable session at a time per project, with sub-agent
+     parallelism (item 25) restricted to read-only profiles
+     (researcher, code-reviewer, static-analysis). The Anthropic
+     C-compiler topology (item 19) is the *opt-in* exception, not
+     the default — it requires shared bare git + lockfiles +
+     specialised roles to work.
 
 ### Tier 7 — human-in-the-loop polish
 
@@ -1089,6 +1237,18 @@ These are cheap to implement and unlock everything else.
     raw tool outputs — only the final summary. This is the same
     "absorb-then-summarise" trick that keeps Claude Code's main
     conversation clean during deep file searches.
+26a. **Structured handoff templates for every sub-agent return.**
+     Per Factory's Missions, the sub-agent's final summary is not
+     free-form prose. It is a fixed-shape Markdown document the
+     parent (and the harness) can parse: `Completed`, `Left undone`,
+     `Commands run` (table with exit codes), `Issues discovered`,
+     `Validation contract coverage`, `Procedure compliance`. The
+     same template applies to every coding-agent run that emits a
+     `done` event, not just delegated sub-agents. Validator runs
+     emit a parallel template: `Result`, `Evidence`, `Failed
+     assertions`, `New risks`, `Gate recommendation`. The
+     orchestrator gates progress on the structured fields; missing
+     or malformed handoffs block the gate. Reference: [The Multi-Agent Architecture That Actually Ships](https://www.youtube.com/watch?v=ow1we5PzK-o).
 
 ### Tier 9 — file system as memory substrate
 
@@ -1300,4 +1460,5 @@ Three orders of magnitude is a lot of room to grow.
 - [Building a C compiler with a team of parallel Claudes — Anthropic](https://www.anthropic.com/engineering/building-c-compiler) — 16 parallel Opus 4.6 agents, shared bare git repo + lockfiles, oracle comparison, $20k / 100k LOC / 99% pass rate
 - [Scaling Managed Agents: Decoupling the brain from the harness — Anthropic](https://www.anthropic.com/engineering/managed-agents) — brain/harness/hands/session 4-way decoupling, stateless harness, sandbox-as-tool
 - [Shell + Skills + Compaction: Tips for long-running agents — OpenAI Developers](https://developers.openai.com/blog/skills-shell-tips) — `SKILL.md` manifest format, "use when / don't use when" routing logic, compaction as default
+- [The Multi-Agent Architecture That Actually Ships — Luke Alvoeiro, Factory](https://www.youtube.com/watch?v=ow1we5PzK-o) — Missions architecture (orchestrator + workers + scrutiny + user-testing validators), validation contract written before implementation, structured worker and validator handoffs, two-validator split (scrutiny vs user-testing), five-pattern multi-agent taxonomy (delegation, creator-verifier, direct comm, negotiation, broadcast), "default to serial writes" execution policy for software development, "droid whispering" per-role model selection, mission-control dashboard, and "keep deterministic infrastructure thin" (bitter-lesson framing). Production data point cited: validation almost never succeeds on the first pass; ~half of LOC in tests; ~90% coverage
 - [Run long horizon tasks with Codex — OpenAI Developers](https://developers.openai.com/blog/run-long-horizon-tasks-with-codex) — 25h / 13M tokens / 30k LOC, the four-file durable-memory pattern (`Prompt.md` / `Plan.md` / `Implement.md` / `Documentation.md`)
